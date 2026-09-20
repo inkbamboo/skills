@@ -1,0 +1,23 @@
+{
+  "skill_name": "scaffold-empty-project",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "搭建一个空项目",
+      "expected_output": "在当前工作目录生成完整的最简全栈项目骨架：Go 后端（cmd/server 入口 + internal/ 分层：bootstrap/controllers/services/dto/model/base/consts，sql/static）+ web/ Vue3 前端 + config 多环境配置 + deploy Docker 部署 + Makefile/pack.sh/README，后端 go build ./... 与 go test ./... 通过，含 /ping 和 /api/v1/demo/hello 示例接口",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "搭一个空项目，名字叫 device-management-system，中文标题叫设备管理系统",
+      "expected_output": "生成名为 device-management-system 的项目骨架，module 名为 device-management-system，标题为设备管理系统，数据库名 device_management_system，所有占位符正确替换，结构同 eval 1",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "新建一个项目，后端端口用 32000，其他按你们的默认结构来",
+      "expected_output": "生成项目骨架，config yaml 中 domain 为 0.0.0.0:32000，docker-compose/部署文件/前端 .env 中端口同步为 32000，其余结构同 eval 1",
+      "files": []
+    }
+  ]
+}
