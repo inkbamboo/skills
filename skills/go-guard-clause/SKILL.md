@@ -22,15 +22,12 @@ func FindUser(req *QueryIn) (*User, error) {
 			if user != nil {
 				if user.Active {
 					return user, nil
-				} else {
-					return nil, ErrInactive
 				}
-			} else {
-				return nil, ErrNotFound
+				return nil, ErrInactive
 			}
-		} else {
-			return nil, err
+			return nil, ErrNotFound
 		}
+		return nil, err
 	}
 	return nil, ErrParam
 }
@@ -64,37 +61,101 @@ func FindUser(req *QueryIn) (*User, error) {
 - 易错操作（解码、解析、类型断言）用独立局部变量接收错误（如 `decodeErr`），避免污染命名返回值
 - 错误路径显式 `return nil, errXxx`；仅函数最后一步调用可借命名返回值裸 `return`
 - 同一函数内多个独立分支各自提前返回，不要为「共享一个返回点」而深嵌套
-- **二选一/优先级取值用 if/else 链，不用无 tag 的 `switch { case cond: }`**。tagless switch 只在 3 个以上互斥分支且 case 体为单行赋值/返回时使用；case 体含多行逻辑（如解密+判空）时 switch 反而割裂阅读。先写「全空/非法」卫语句，再按优先级取值
+
+### 分支收尾即 return（三个递进层次）
+
+分支是函数的完整终点时，按能到达的层次改写，不用 `else if` 串接：
+
+1. 分支执行完就无事可做 → 分支末尾直接 `return`，下一个条件写**独立 if**。每个分支平顶展开，读者无需回溯前面所有分支的取反条件
+2. 独立 if 是函数**最后一个**分支且「条件不成立时什么都不做」→ 条件**反向**为卫语句提前 `return`，主逻辑脱掉 if 外壳平铺到函数尾——卫语句始终在最顶上，主逻辑始终在零嵌套的最深处
+3. 改写后若函数有命名返回值，收尾 `return` 可以裸写
 
 ```go
-// 反例：tagless switch 割裂了两分支的简单二选一
-switch {
-case req.ShareId != "":
-	var shareInfo *ShareInfo
-	if shareInfo, err = decrypt(req.ShareId); err != nil {
+// 反例：else if 链式串接，读后面分支要回溯前面的否定条件
+func applyDiscount(order *Order) {
+	if order.VipLevel >= 3 {
+		order.Price *= 0.8
+	} else if order.Coupon != "" {
+		order.Price *= 0.9
+	}
+}
+
+// 正例：分支收尾 return + 尾段反转卫语句，主逻辑平铺到函数尾
+func applyDiscount(order *Order) {
+	if order.VipLevel >= 3 {
+		order.Price *= 0.8
 		return
 	}
-	boxIdx = shareInfo.BoxIdx
-case req.BoxIdx != "":
-	boxIdx = req.BoxIdx
+	if order.Coupon == "" {
+		return
+	}
+	order.Price *= 0.9
+}
+```
+
+适用边界：
+- 层次 1 的前提是分支体为函数尾部唯一要做的事。若分支后还有**公共收尾逻辑**（如统一落库），保持 if/else 互斥结构、收尾写一份，不要在每个分支里重复
+- 层次 2 仅当反向条件有清晰语义时使用（如「范围过小，无法映射」），并在卫语句上方写一行注释说明不成立时保持原值/跳过的原因——反向条件往往比正向难读，注释补上这一层
+
+### 二选一/优先级取值用 if/else 链，不用 tagless switch
+
+无 tag 的 `switch { case cond: }` 只在 3 个以上互斥分支且 case 体为单行赋值/返回时使用；case 体含多行逻辑（如解密+判空）时 switch 割裂阅读。先写「全空/非法」卫语句，再按优先级取值。
+
+```go
+// 反例：两分支二选一被 tagless switch 割裂
+switch {
+case req.Token != "":
+	var payload *Payload
+	if payload, err = decodeToken(req.Token); err != nil {
+		return
+	}
+	filter = payload.Filter
 default:
-	return "", ErrParam
+	filter = req.Filter
 }
 
 // 正例：全空判断前置为卫语句，if/else 按优先级取值
-if req.ShareId == "" && req.BoxIdx == "" {
+if req.Token == "" && req.Filter == "" {
 	return "", ErrParam
 }
-if req.ShareId != "" {
-	var shareInfo *ShareInfo
-	if shareInfo, err = decrypt(req.ShareId); err != nil {
+if req.Token != "" {
+	var payload *Payload
+	if payload, err = decodeToken(req.Token); err != nil {
 		return
 	}
-	boxIdx = shareInfo.BoxIdx
+	filter = payload.Filter
 } else {
-	boxIdx = req.BoxIdx
+	filter = req.Filter
 }
 ```
+
+### 已定义的变量不再用 `:=` 重复声明
+
+函数有命名返回值 `err`（或 `err` 已在前文声明）时，`ok, err := f()` 虽因含新变量在语法上合法，但读起来像把 `err` 重新定义了一遍；更危险的是该语句一旦被挪进嵌套作用域（if/for 块内）就变成真遮蔽，defer 中的 `err` 日志会永远拿到 nil。统一写法：新变量 `var` 预声明，赋值放进 if 初始化语句；若赋值结果需供 if 块之后的代码使用，则 `var` 预声明 + 单独一行 `=` 赋值。
+
+```go
+// 反例：err 是命名返回值（签名中已定义），:= 造成「重复定义」观感
+func BuildReport(...) (report *Report, err error) {
+	conn, err := dialPrimary(...)
+	if err != nil {
+		return fromCache(...)
+	}
+	...
+}
+
+// 正例：新变量 var 预声明，赋值放进 if 初始化语句
+func BuildReport(...) (report *Report, err error) {
+	var conn *Conn
+	if conn, err = dialPrimary(...); err != nil || conn == nil {
+		return fromCache(...)
+	}
+	...
+}
+```
+
+注意两点：
+- if 初始化语句里必须用 `=`（不是 `:=`）——`:=` 会在 if 块内新建作用域变量、遮蔽外层/命名返回值
+- `err` 是**首次出现**的新变量时 `:=` 是正确且首选的（如正例 `FindUser` 中的 `user, err := db.GetUser(...)`）；只有变量已存在（命名返回值、前文声明过）才要求预声明 + `=`
 
 ## 二、消除冗余
 
@@ -148,35 +209,34 @@ func (h *Handler) GetDetail(ctx Ctx) error {
 
 ### 例外：多端复用同一 handler 时，端差异规则下沉业务层
 
-同一 handler 被注册到多个端路由（如小程序 `/v1/xxx` 与 App `/app/v1/xxx`，靠路由注册时传入的 providerType 区分）时，**各端不同的参数规则与归属校验属于业务规则**，且被多个 handler 复用——此时应下沉到业务层提供共用解析方法，入口层只负责取值并转换为标识传下去。「不做前置检查」针对的是单一入口的登录/来源检查，不要混淆。
+同一 handler 被注册到多个端路由（如小程序 `/v1/xxx` 与 App `/app/v1/xxx`，靠路由注册时传入的 providerType 区分）时，**各端不同的参数规则与归属校验属于业务规则**，且被多个 handler 复用——下沉到业务层提供共用解析方法，入口层只负责取值并转换为标识传下去。「不做前置检查」针对的是单一入口的登录/来源检查，不要混淆。
 
-规则：
-- 入口层取值一次：登录用户、providerType（路由注册时确定，与登录状态无关），把 providerType 转换成 `isApp bool` 这类**无框架语义的标识**再传
+- 入口层取值一次：登录用户、providerType，把 providerType 转换成 `isApp bool` 这类**无框架语义的标识**再传
 - 业务层解析方法签名收基础类型（`req *In, isApp bool, playerId int64`），不收会话/凭证结构体、不感知路由与中间件
 - 端差异规则写进函数头注释（哪个端允许哪些参数、是否校验登录/归属），校验用卫语句前置
 
 ```go
 // 业务层：端差异规则集中在此，多个 handler 复用
-// app 端（isApp）：share_id 与 box_idx 均可传，须已登录且为资源归属人本人；
-// 小程序端：必须传 share_id，不校验登录与归属。
-func (s *Service) ResolveBoxIdx(req *In, isApp bool, playerId int64) (boxIdx string, err error) {
-	if !isApp && req.ShareId == "" {
+// app 端（isApp）：token 与 target_id 均可传，须已登录且为资源归属人本人；
+// 小程序端：必须传 token，不校验登录与归属。
+func (s *Service) ResolveTarget(req *In, isApp bool, playerId int64) (targetId string, err error) {
+	if !isApp && req.Token == "" {
 		return "", ErrParam
 	}
 	if isApp && playerId <= 0 {
 		return "", ErrLogin
 	}
-	// ... 解析 share_id / box_idx，卫语句排除非法值 ...
+	// ... 解析 token / target_id，卫语句排除非法值 ...
 	if isApp {
-		if err = s.checkOwner(boxIdx, playerId); err != nil {
+		if err = s.checkOwner(targetId, playerId); err != nil {
 			return
 		}
 	}
-	return boxIdx, nil
+	return targetId, nil
 }
 
 // 入口层：仅取值与组装调用，不抽 helper
-func (h *Handler) GetRoom(ctx Ctx) error {
+func (h *Handler) GetResource(ctx Ctx) error {
 	req := &In{}
 	if err := ctx.Bind(req); err != nil {
 		return ErrParam
@@ -185,7 +245,7 @@ func (h *Handler) GetRoom(ctx Ctx) error {
 	if user := h.BaseUser(ctx); user != nil {
 		playerId = user.ID
 	}
-	boxIdx, err := h.svc.ResolveBoxIdx(req, h.isApp(), playerId)
+	targetId, err := h.svc.ResolveTarget(req, h.isApp(), playerId)
 	if err != nil {
 		return err
 	}
@@ -243,7 +303,7 @@ func (s *Service) getOwnerId(resKey string) (ownerId int64) {
 ## 六、注释规范
 
 - 中文注释，解释**为什么**而非复述代码
-- 函数头注释写明规则（不同入参/状态下的行为差异），如正例中 `FindUser` 的头注释
+- 函数头注释写明规则（不同入参/状态下的行为差异），如 `FindUser` 的头注释
 - 关键决策处加行内注释说明取舍（如「结果中已含归属人ID，直接比对无需查库」「兜底查库」）
 
 ## 七、修改流程
