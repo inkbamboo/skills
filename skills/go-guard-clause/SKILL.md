@@ -1,6 +1,6 @@
 ---
 name: go-guard-clause
-description: Go 代码风格规范。编写或修改任何 Go 逻辑代码时必须使用本 skill：新增函数或方法、函数重构（卫语句、消除嵌套）、条件校验逻辑、消除冗余调用、缓存优先的数据获取、review Go 代码规范性。用户说「写简洁点」「优化写法」「规范一下」「能 return 的优先 return」时也必须触发。仅编写注释或接口文档、编译/部署/切 Go 版本、前端、SQL 索引、脚本类任务不适用。
+description: Go 代码风格规范。编写或修改任何 Go 逻辑代码时必须使用本 skill：新增函数或方法、函数重构（卫语句、消除嵌套）、条件校验逻辑、消除冗余调用、缓存优先的数据获取、review Go 代码规范性。用户说「写简洁点」「优化写法」「规范一下」「能 return 的优先 return」时也必须触发。涉及变量遮蔽（局部遮蔽包级标识符、嵌套块内 err 重复定义）、命名规范（去阶段数字、魔数提常量）、计数循环改 range-int 时也必须触发。仅编写注释或接口文档、编译/部署/切 Go 版本、前端、SQL 索引、脚本类任务不适用。
 ---
 
 # Go 代码风格规范
@@ -157,6 +157,45 @@ func BuildReport(...) (report *Report, err error) {
 - if 初始化语句里必须用 `=`（不是 `:=`）——`:=` 会在 if 块内新建作用域变量、遮蔽外层/命名返回值
 - `err` 是**首次出现**的新变量时 `:=` 是正确且首选的（如正例 `FindUser` 中的 `user, err := db.GetUser(...)`）；只有变量已存在（命名返回值、前文声明过）才要求预声明 + `=`
 - 判断「err 是否已定义」**只看当前函数作用域**：命名返回值、前文 `var`/`:=` 声明。`if err := f()` 里的 err 属于 if 块的独立作用域，**不算**已定义，不影响后续再次 `err :=`
+
+### 嵌套作用域内禁止 `err :=` 遮蔽外层已声明的 err
+
+外层函数作用域已有 `err`（命名返回值或前文声明）时，**任何嵌套块**（if 初始化语句、if/for 块体、循环体内）中出现 `err :=` 都是真遮蔽——虽然语法合法，但 defer 日志、外层后续检查拿到的仍是旧值。统一改法：if 初始化语句里 `:=` 换 `=`；循环体内需要新变量时循环外 `var` 预声明。
+
+```go
+// 反例 1：if-init 内 := 遮蔽外层 err（ref, err := 已在前文声明）
+if err := utils.ReadJSON(path, &cfg); err != nil {
+	return fmt.Errorf("读取配置失败: %w", err)
+}
+
+// 正例 1：复用外层 err，if-init 用 =
+if err = utils.ReadJSON(path, &cfg); err != nil {
+	return fmt.Errorf("读取配置失败: %w", err)
+}
+
+// 反例 2：循环体内 extra, err := 每次迭代都遮蔽外层 err
+for _, f := range files {
+	extra, err := utils.ReadCSV(f)
+	if err != nil {
+		return nil, err
+	}
+	...
+}
+
+// 正例 2：新变量循环外 var 预声明，循环内用 = 复用外层 err
+var extra *Table
+for _, f := range files {
+	extra, err = utils.ReadCSV(f)
+	if err != nil {
+		return nil, err
+	}
+	...
+}
+```
+
+边界：
+- 与上节第三点对照：`if err := f()` 的 err 是否构成遮蔽，**看外层函数作用域是否已有同名 err**。没有则 `:=` 正常；有则必须 `=`。函数内存在多处 if-init 检查时，建议函数开头一次声明 `err`，后续全部 `=`，全文只用一个 err 变量
+- AST 遮蔽检测可用 go/ast 自写检查器（walk Block/if/for/range/switch 作用域栈）批量扫包级目录；`_` 空标识符的多重出现不构成遮蔽，可忽略
 
 ### 混合形态：`已有参数, 新err := f(...)`
 
@@ -331,7 +370,65 @@ func (s *Service) getOwnerId(resKey string) (ownerId int64) {
 - 函数头注释写明规则（不同入参/状态下的行为差异），如 `FindUser` 的头注释
 - 关键决策处加行内注释说明取舍（如「结果中已含归属人ID，直接比对无需查库」「兜底查库」）
 
-## 七、修改流程
+## 七、循环与命名规范
+
+### 计数循环用 range-int（Go 1.22+）
+
+纯计数循环 `for i := 0; i < n; i++` 统一写成 `for i := range n`。遍历切片/映射用 `for i := range s` 或 `for k, v := range m`；仅索引时不需要 `_` 占位值。
+
+```go
+// 反例：经典三段式计数循环
+for i := 0; i < len(rows); i++ {
+	rows[i] = ...
+}
+for i := 0; i < n; i++ {
+	vals[i] = f(i)
+}
+
+// 正例：range-int 直接写
+for i := range rows {
+	rows[i] = ...
+}
+for i := range n {
+	vals[i] = f(i)
+}
+```
+
+### 局部变量不得遮蔽包级标识符
+
+包级函数/变量用了通用名（`sum`、`max`、`count` 等）后，函数体内 `sum := 0.0` 这类局部声明会静默遮蔽它——本想累加却定义了一个同名新变量，编译器不报错。两种修法按场景选：
+
+```go
+// 反例：包级有 func sum(xs []float64) float64，函数内局部 sum 把它遮蔽了
+func weightedMean(xs []float64) float64 {
+	sum := 0.0        // 遮蔽包级 sum 函数
+	for _, x := range xs {
+		sum += x
+	}
+	return sum / float64(len(xs))
+}
+
+// 正例 A（首选）：包级通用名太宽泛，改名让语义更窄更准
+func sumOf(xs []float64) float64 { ... }  // 包级改名 sumOf
+
+// 正例 B：局部变量换有语义的名字
+func weightedMean(xs []float64) float64 {
+	total := 0.0      // 局部换名，不与包级冲突
+	for _, x := range xs {
+		total += x
+	}
+	return total / float64(len(xs))
+}
+```
+
+选择顺序：包级标识符是通用名（sum/max/min/count/find）→ 优先改包级名（`sumOf`/`maxOf`/`findFirst`），通用名本就不该占据包级命名空间；包级名语义明确且被多处引用 → 改局部变量名。检测方式：对包内每个 `:=`/`var` 声明的标识符，比对包级标识符表。
+
+### 命名不带阶段/序号数字，魔数提常量
+
+- 文件名与标识符不用 `stage1`、`output23`、`calc2` 这类阶段序号命名：数字不传达语义，读者无从知道 1 和 2 的差别。按**职责**命名——`stage1.go` → `single.go`（单灾评价）、`output23.go` 与 `output.go` 职责相近则直接**合并**为一个文件
+- 函数体内的字面量魔数（如网格面积 `0.0025`）提取为有语义的包级常量 `gridAreaKm2`，同一魔数多处出现时尤其必须收敛为单一常量定义
+
+## 八、修改流程
 
 1. **先调研再动手**：读入参结构、路由注册方式（同一 handler 可能被多条路由复用）、相关 service
 2. **改公共方法前先搜所有调用点**，确认影响面后再改签名
